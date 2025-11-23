@@ -172,6 +172,11 @@ public:
     void solve();
     /// Dump results into a file
     void dumpResult();
+
+    void initSolver();
+    std::unordered_set<EdgeLabel> unarySumm(EdgeLabel lbl);
+    std::unordered_set<EdgeLabel> binarySumm(EdgeLabel left, EdgeLabel right);
+    void addNewEdgeToGraphAndWorklist(unsigned src, unsigned dst, EdgeLabel lbl);
 };
 
 #endif //ANSWERS_A4HEADER_H
