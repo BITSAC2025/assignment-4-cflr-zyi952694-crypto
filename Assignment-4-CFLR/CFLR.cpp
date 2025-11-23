@@ -19,11 +19,13 @@ int main(int argc, char **argv)
 
     SVFIRBuilder builder;
     auto pag = builder.build();
-    pag->dump();
+    
+    std::string pagDotFile = pag->getModuleIdentifier() + ".dot";
+    pag->dump(pagDotFile);
 
     CFLR solver;
     solver.buildGraph(pag);
-    // TODO: complete this method
+    // TODO: 完成此方法
     solver.solve();
     solver.dumpResult();
 
@@ -34,89 +36,170 @@ int main(int argc, char **argv)
 
 void CFLR::solve()
 {
-    // TODO: complete this function. The implementations of graph and worklist are provided.
-    //  You need to:
-    //  1. implement the grammar production rules into code;
-    //  2. implement the dynamic-programming CFL-reachability algorithm.
-    //  You may need to add your new methods to 'CFLRGraph' and 'CFLR'.
+    // 收集所有节点并用现有边初始化工作列表
+    std::unordered_set<unsigned> nodeSet;
 
-    // --- Safety / sanity check ---
-    if (!graph) return;
+    for (auto &nodeItr : graph->getSuccessorMap())
+    {
+        unsigned sourceNode = nodeItr.first;
+        nodeSet.insert(sourceNode);
 
-    // Helper to combine two labels into a resulting label according to grammar/production rules.
-    // CURRENT STRATEGY:
-    //  - if labels are equal, keep that label;
-    //  - otherwise, conservatively produce Copy.
-    // Replace/add rules here to match the actual CFL grammar for your analysis.
-    auto combineLabels = [](EdgeLabel l1, EdgeLabel l2) -> EdgeLabel {
-        if (l1 == l2) return l1;
-        return static_cast<EdgeLabel>(Copy);
-    };
-
-    // Get maps
-    auto &succMap = graph->getSuccessorMap();
-    auto &predMap = graph->getPredecessorMap();
-
-    // Initialize worklist with all existing edges in the graph
-    for (const auto &srcPair : succMap) {
-        unsigned src = srcPair.first;
-        const auto &labelMap = srcPair.second;
-        for (const auto &labelTargets : labelMap) {
-            EdgeLabel lbl = labelTargets.first;
-            const auto &targets = labelTargets.second;
-            for (unsigned dst : targets) {
-                CFLREdge e(src, dst, lbl);
-                workList.push(e);
+        for (auto &lblItr : nodeItr.second)
+        {
+            EdgeLabel edgeType = lblItr.first;
+            for (auto targetNode : lblItr.second)
+            {
+                nodeSet.insert(targetNode);
+                workList.push(CFLREdge(sourceNode, targetNode, edgeType));
             }
         }
     }
 
-    // Main DP-style worklist loop
-    while (!workList.empty()) {
-        CFLREdge cur = workList.pop();
-        unsigned u = cur.src;
-        unsigned v = cur.dst;
-        EdgeLabel lab = cur.label;
-
-        // 1) Forward composition: (u -lab-> v) + (v -lab2-> w) => (u -combine(lab,lab2)-> w)
-        auto succIt = succMap.find(v);
-        if (succIt != succMap.end()) {
-            const auto &outLabelMap = succIt->second;
-            for (const auto &lblTargets : outLabelMap) {
-                EdgeLabel lab2 = lblTargets.first;
-                const auto &wset = lblTargets.second;
-                EdgeLabel newLab = combineLabels(lab, lab2);
-                for (unsigned w : wset) {
-                    if (!graph->hasEdge(u, w, newLab)) {
-                        graph->addEdge(u, w, newLab);
-                        workList.push(CFLREdge(u, w, newLab));
-                    }
-                }
-            }
+    // 辅助lambda函数：如果边不存在则添加新边
+    auto insertNewEdge = [this](unsigned from, unsigned to, EdgeLabel lbl) {
+        if (!graph->hasEdge(from, to, lbl))
+        {
+            graph->addEdge(from, to, lbl);
+            workList.push(CFLREdge(from, to, lbl));
         }
+    };
 
-        // 2) Backward composition: (x -lab1-> u) + (u -lab-> v) => (x -combine(lab1,lab)-> v)
-        auto predIt = predMap.find(u);
-        if (predIt != predMap.end()) {
-            const auto &inLabelMap = predIt->second;
-            for (const auto &lblSrcs : inLabelMap) {
-                EdgeLabel lab1 = lblSrcs.first;
-                const auto &xset = lblSrcs.second;
-                EdgeLabel newLab = combineLabels(lab1, lab);
-                for (unsigned x : xset) {
-                    if (!graph->hasEdge(x, v, newLab)) {
-                        graph->addEdge(x, v, newLab);
-                        workList.push(CFLREdge(x, v, newLab));
-                    }
-                }
-            }
+    // 初始化VF、VFBar和VA的自反边
+    for (auto nodeId : nodeSet)
+    {
+        insertNewEdge(nodeId, nodeId, VF);
+        insertNewEdge(nodeId, nodeId, VFBar);
+        insertNewEdge(nodeId, nodeId, VA);
+    }
+
+    // 辅助函数：应用前向规则 A -> B C（如果src->dst有标签A且dst->next有标签B，则添加src->next标签C）
+    auto applyForwardRule = [&](unsigned src, unsigned dst, EdgeLabel srcLabel, EdgeLabel followLabel, EdgeLabel resultLabel) {
+        auto &succMap = graph->getSuccessorMap();
+        if (succMap.count(dst) && succMap[dst].count(followLabel))
+        {
+            for (auto nextNode : succMap[dst][followLabel])
+                insertNewEdge(src, nextNode, resultLabel);
         }
+    };
 
-        // NOTE:
-        // - The skeleton above performs a generic closure that composes adjacent edges.
-        // - To implement the precise CFL grammar of your pointer analysis (e.g., productions
-        //   like Copy, Store/Load interactions, Addr/AddrBar interactions, PT derivations, etc.),
-        //   replace 'combineLabels' with the exact production mapping and add any
-        //   additional special-case productions here.
+    // 辅助函数：应用后向规则 A -> B C（如果prev->src有标签B且src->dst有标签A，则添加prev->dst标签C）
+    auto applyBackwardRule = [&](unsigned src, unsigned dst, EdgeLabel srcLabel, EdgeLabel prevLabel, EdgeLabel resultLabel) {
+        auto &predMap = graph->getPredecessorMap();
+        if (predMap.count(src) && predMap[src].count(prevLabel))
+        {
+            for (auto prevNode : predMap[src][prevLabel])
+                insertNewEdge(prevNode, dst, resultLabel);
+        }
+    };
+
+    // 主工作列表算法
+    while (!workList.empty())
+    {
+        CFLREdge currentEdge = workList.pop();
+        unsigned src = currentEdge.src;
+        unsigned dst = currentEdge.dst;
+        EdgeLabel edgeLabel = currentEdge.label;
+
+        auto &successorMap = graph->getSuccessorMap();
+        auto &predecessorMap = graph->getPredecessorMap();
+
+        // 根据边标签使用switch语句应用语法规则
+        switch (edgeLabel)
+        {
+            case VFBar:
+                applyForwardRule(src, dst, VFBar, AddrBar, PT);
+                // VFBar的传递闭包：VFBar ∷= VFBar VFBar
+                applyForwardRule(src, dst, VFBar, VFBar, VFBar);
+                applyBackwardRule(src, dst, VFBar, VFBar, VFBar);
+                applyForwardRule(src, dst, VFBar, VA, VA);
+                break;
+
+            case AddrBar:
+                applyBackwardRule(src, dst, AddrBar, VFBar, PT);
+                break;
+
+            case Addr:
+                applyForwardRule(src, dst, Addr, VF, PTBar);
+                break;
+
+            case VF:
+                applyForwardRule(src, dst, VF, VF, VF);
+                applyBackwardRule(src, dst, VF, VF, VF);
+                applyBackwardRule(src, dst, VF, Addr, PTBar);
+                applyBackwardRule(src, dst, VF, VA, VA);
+                break;
+
+            case Copy:
+                insertNewEdge(src, dst, VF);
+                break;
+
+            case SV:
+                applyForwardRule(src, dst, SV, Load, VF);
+                break;
+
+            case Load:
+                applyBackwardRule(src, dst, Load, SV, VF);
+                applyBackwardRule(src, dst, Load, PV, VF);
+                applyBackwardRule(src, dst, Load, LV, VA);
+                break;
+
+            case PV:
+                applyForwardRule(src, dst, PV, Load, VF);
+                applyForwardRule(src, dst, PV, StoreBar, VFBar);
+                break;
+
+            case Store:
+                applyForwardRule(src, dst, Store, VP, VF);
+                applyForwardRule(src, dst, Store, VA, SV);
+                break;
+
+            case VP:
+                applyBackwardRule(src, dst, VP, Store, VF);
+                applyBackwardRule(src, dst, VP, LoadBar, VFBar);
+                break;
+
+            case CopyBar:
+                insertNewEdge(src, dst, VFBar);
+                break;
+
+            case LoadBar:
+                applyForwardRule(src, dst, LoadBar, SVBar, VFBar);
+                applyForwardRule(src, dst, LoadBar, VP, VFBar);
+                applyForwardRule(src, dst, LoadBar, VA, LV);
+                break;
+
+            case SVBar:
+                applyBackwardRule(src, dst, SVBar, LoadBar, VFBar);
+                break;
+
+            case StoreBar:
+                applyBackwardRule(src, dst, StoreBar, VA, SVBar);
+                break;
+
+            case LV:
+                applyForwardRule(src, dst, LV, Load, VA);
+                break;
+
+            case VA:
+                applyBackwardRule(src, dst, VA, VFBar, VA);
+                applyForwardRule(src, dst, VA, VF, VA);
+                applyBackwardRule(src, dst, VA, Store, SV);
+                applyForwardRule(src, dst, VA, StoreBar, SVBar);
+                applyBackwardRule(src, dst, VA, PTBar, PV);
+                applyForwardRule(src, dst, VA, PT, VP);
+                applyBackwardRule(src, dst, VA, LoadBar, LV);
+                break;
+
+            case PTBar:
+                applyForwardRule(src, dst, PTBar, VA, PV);
+                break;
+
+            case PT:
+                applyBackwardRule(src, dst, PT, VA, VP);
+                break;
+
+            default:
+                break;
+        }
     }
 }
